@@ -1,0 +1,27 @@
+# Create /etc/systemd/system/rfid-door.Service with the following contents:
+### --------------------------------------------------
+
+    [Unit]
+    Description=RFID + PIN Door Access Control Service
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=simple
+    User=yourusername          # ← change to your non-root user
+    Group=yourusername
+    WorkingDirectory=/opt
+    ExecStart=/usr/bin/python3 /opt/sentinel_main.py
+    Restart=always
+    RestartSec=5
+    StandardOutput=journal
+    StandardError=journal
+
+    [Install]
+    WantedBy=multi-user.target
+
+
+## Restart systemd for effect to take hold:
+    sudo systemctl daemon-reload
+    sudo systemctl enable rfid-door.service
+    sudo systemctl start rfid-door.service
