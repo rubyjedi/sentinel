@@ -6,6 +6,7 @@ from requests.auth import HTTPBasicAuth
 from gpiozero import MatrixKeypad, OutputDevice
 from RPLCD.i2c import CharLCD
 from rpi_rc522 import MFRC522  # Adjust import if using different MFRC522 fork
+import os
 
 # =======================================
 # COMMAND-LINE ARGUMENTS
@@ -48,22 +49,81 @@ def read_config(file_path, default=None):
         print(f"Error reading {file_path}: {e}")
         return default
 
-# Load config
-ZONE_CODE      = read_config(CONFIG_FILES['zone'], default="UNKNOWN_ZONE")
+# Load config (except zone, which we handle specially)
 SOURCE_DEVICE  = read_config(CONFIG_FILES['device'], default="team4-pi")
 SOURCE_TEAM    = read_config(CONFIG_FILES['team'], default="Team4")
-AUTH_ENDPOINT  = read_config(CONFIG_FILES['auth_endpoint']")
+AUTH_ENDPOINT  = read_config(CONFIG_FILES['auth_endpoint'])
+AUDIT_ENDPOINT = read_config(CONFIG_FILES['audit_endpoint'])
 AUTH_USERNAME  = read_config(CONFIG_FILES['auth_username'])
 AUTH_PASSWORD  = read_config(CONFIG_FILES['auth_password'])
-AUDIT_ENDPOINT = read_config(CONFIG_FILES['audit_endpoint'])
 
 if not AUTH_ENDPOINT:
     print("CRITICAL: Auth endpoint not configured")
 if not AUTH_USERNAME or not AUTH_PASSWORD:
     print("WARNING: Basic Auth credentials missing")
 
+# Special handling for ZONE_CODE
+ZONE_FILE = CONFIG_FILES['zone']
+zone_options = {
+    '1': 'EXEC',
+    '2': 'HRFILE',
+    '3': 'ITROOM',
+    '4': 'LAB',
+    '5': 'LOBBY'
+}
+
+if os.path.exists(ZONE_FILE):
+    ZONE_CODE = read_config(ZONE_FILE)
+    if not ZONE_CODE:
+        print("WARNING: Zone file exists but is empty — using default")
+        ZONE_CODE = "UNKNOWN_ZONE"
+else:
+    # File doesn't exist: Prompt for zone setup
+    print("Zone file not found — setting up zone...")
+    ZONE_CODE = None
+    selected_key = None
+
+    if SIMULATE_MODE:
+        # Console prompt for simulation
+        while selected_key not in zone_options:
+            selected_key = input("Enter zone number (1-5): ").strip()
+            if selected_key in zone_options:
+                ZONE_CODE = zone_options[selected_key]
+            else:
+                print("Invalid: Choose 1-5")
+    else:
+        # Use keypad and LCD for real hardware
+        if 'lcd' in globals() and lcd:  # LCD will be initialized later, but we can init early if needed
+            lcd.clear()
+            lcd.write_string("Set Zone: 1-5")
+        while selected_key not in zone_options:
+            if 'keypad' in globals() and keypad:
+                pressed = keypad.keys_pressed
+                for key in pressed:
+                    if key in zone_options:
+                        selected_key = key
+                        ZONE_CODE = zone_options[selected_key]
+                        if lcd:
+                            lcd.clear()
+                            lcd.write_string(f"Zone: {ZONE_CODE[:16]}")
+                        time.sleep(2)
+                        break
+            time.sleep(0.1)
+
+    if ZONE_CODE:
+        # Write to file
+        try:
+            with open(ZONE_FILE, 'w') as f:
+                f.write(ZONE_CODE)
+            print(f"Zone set to {ZONE_CODE} and saved to {ZONE_FILE}")
+        except Exception as e:
+            print(f"Failed to write zone file: {e} — continuing with {ZONE_CODE}")
+    else:
+        print("Zone setup failed — using default")
+        ZONE_CODE = "UNKNOWN_ZONE"
+
 # =======================================
-# HARDWARE (only initialize if not in pure simulation)
+# HARDWARE (only if not pure simulation)
 # =======================================
 
 reader = None
@@ -76,9 +136,9 @@ if not SIMULATE_MODE:
     try:
         reader = MFRC522()
     except Exception as e:
-        print(f"RFID init failed: {e} → continuing without reader")
+        print(f"RFID init failed: {e}")
 
-    # Keypad (4x3 example - adjust pins!)
+    # Keypad
     try:
         keypad = MatrixKeypad(
             row_pins=[21, 20, 16, 12],
@@ -95,11 +155,11 @@ if not SIMULATE_MODE:
     except Exception as e:
         print(f"LCD init failed: {e}")
 
-    # Door relay
+    # Door
     try:
-        door = OutputDevice(18, active_high=True, initial_value=False)  # ← your pin
+        door = OutputDevice(18, active_high=True, initial_value=False)  # your pin
     except Exception as e:
-        print(f"Door output init failed: {e}")
+        print(f"Door init failed: {e}")
 
 # =======================================
 # MAIN LOGIC
@@ -222,5 +282,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nStopped by user")
     finally:
-        # Cleanup (optional but good practice)
         if door: door.off()
