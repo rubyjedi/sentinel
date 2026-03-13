@@ -52,10 +52,10 @@ def read_config(file_path, default=None):
 ZONE_CODE      = read_config(CONFIG_FILES['zone'], default="UNKNOWN_ZONE")
 SOURCE_DEVICE  = read_config(CONFIG_FILES['device'], default="team4-pi")
 SOURCE_TEAM    = read_config(CONFIG_FILES['team'], default="Team4")
-AUTH_ENDPOINT  = read_config(CONFIG_FILES['auth_endpoint'])
-AUDIT_ENDPOINT = read_config(CONFIG_FILES['audit_endpoint'])
+AUTH_ENDPOINT  = read_config(CONFIG_FILES['auth_endpoint']")
 AUTH_USERNAME  = read_config(CONFIG_FILES['auth_username'])
 AUTH_PASSWORD  = read_config(CONFIG_FILES['auth_password'])
+AUDIT_ENDPOINT = read_config(CONFIG_FILES['audit_endpoint'])
 
 if not AUTH_ENDPOINT:
     print("CRITICAL: Auth endpoint not configured")
