@@ -1,65 +1,93 @@
 import time
-from gpiozero import MatrixKeypad
+import requests
+from gpiozero import MatrixKeypad, OutputDevice
 from signal import pause
 from RPLCD.i2c import CharLCD
-from rpi_rc522 import MFRC522
-import requests
+from rpi_rc522 import MFRC522  # or from mfrc522 import MFRC522 if using different fork
 
-# Initialize RFID reader (MFRC522 via SPI)
+# =======================================
+# CONFIGURATION
+# =======================================
+
+# RFID reader
 reader = MFRC522()
 
-# Initialize Keypad (assuming 4x3 matrix, adjust pins as needed)
+# Keypad (4x3 matrix example - adjust pins to match your wiring)
 keypad = MatrixKeypad(
-    row_pins=[21, 20, 16],  # Example GPIO pins for rows
-    col_pins=[26, 19, 13, 6],  # Example GPIO pins for columns (4th for #/* if needed, but for 4x3 use 3 cols)
-    keys=[['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['*', '0', '#']]
+    row_pins=[21, 20, 16, 12],      # 4 rows
+    col_pins=[26, 19, 13],          # 3 columns
+    keys=[
+        ['1', '2', '3'],
+        ['4', '5', '6'],
+        ['7', '8', '9'],
+        ['*', '0', '#']
+    ]
 )
 
-# Initialize LCD (assuming I2C address 0x27, 16x2 display; adjust if different)
-lcd = CharLCD(i2c_expander='PCF8574', address=0x27, port=1, cols=16, rows=2, dotsize=8)
+# LCD (I2C - common PCF8574 backpack at 0x27; change address if needed)
+lcd = CharLCD(i2c_expander='PCF8574', address=0x27, port=1,
+              cols=16, rows=2, dotsize=8,
+              charmap='A00', auto_linebreaks=True)
 
-# Placeholder API endpoint (replace with your actual URL)
-API_ENDPOINT = "https://example.com/api/auth"
+# Door unlock relay / signal pin (active high assumed; change pin and active_high if needed)
+unlock_pin = 18  # Example GPIO pin connected to relay or door controller
+door = OutputDevice(unlock_pin, active_high=True, initial_value=False)
+
+# API endpoint (replace with real URL)
+API_ENDPOINT = "https://your-server.com/api/verify"  # ← CHANGE THIS
 
 def read_file(file_path):
-    with open(file_path, 'r') as f:
-        return f.read().strip()
+    try:
+        with open(file_path, 'r') as f:
+            return f.read().strip()
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return ""
 
-# Main loop
+# =======================================
+# MAIN LOOP
+# =======================================
 while True:
-    # Wait for RFID
     badge_uid = None
+
+    # 1. Wait for RFID card
+    lcd.clear()
+    lcd.write_string("Scan badge...")
+    
     while not badge_uid:
         (status, TagType) = reader.MFRC522_Request(reader.PICC_REQIDL)
         if status == reader.MI_OK:
-            (status, uid) = reader.MFRC522_SelectTagSN()
+            (status, uid) = reader.MFRC522_Anticoll()  # or reader.MFRC522_SelectTagSN() in some forks
             if status == reader.MI_OK:
-                badge_uid = ''.join(format(x, '02x') for x in uid)  # Convert to hex string
-                print(f"RFID UID: {badge_uid}")  # For debugging
+                badge_uid = ''.join(format(x, '02x') for x in uid).upper()
+                print(f"Badge UID: {badge_uid}")
+        time.sleep(0.1)
 
-    # Display "Enter PIN:" on LCD
+    # 2. Prompt for PIN
     lcd.clear()
     lcd.write_string("Enter PIN:")
 
-    # Collect 4-digit PIN from keypad
     pin_code = ""
     while len(pin_code) < 4:
-        key = keypad.wait_for_press(timeout=0.1)  # Non-blocking check
-        if key and key.isdigit():  # Only accept digits 0-9
-            pin_code += key
-            # Optionally display * on LCD for security
-            lcd.cursor_pos = (1, len(pin_code) - 1)
-            lcd.write_string('*')
-        time.sleep(0.1)  # Debounce
+        keys = keypad.keys_pressed  # or use when_pressed callback if preferred
+        for key in keys:
+            if key.isdigit():
+                pin_code += key
+                # Show * on second line for privacy
+                lcd.cursor_pos = (1, len(pin_code) - 1)
+                lcd.write_string('*')
+                time.sleep(0.2)  # simple debounce
+                break
+        time.sleep(0.05)
 
-    print(f"PIN: {pin_code}")  # For debugging
+    print(f"PIN entered: {pin_code}")
 
-    # Read values from files
-    zone_code = read_file('/opt/zone.txt')
-    source_device = read_file('/opt/device.txt')  # Should be "team4-pi"
-    source_team = read_file('/opt/team.txt')  # Should be "Team4"
+    # 3. Read static values from files
+    zone_code    = read_file('/opt/zone.txt')
+    source_device = read_file('/opt/device.txt') or "team4-pi"
+    source_team   = read_file('/opt/team.txt')   or "Team4"
 
-    # Prepare JSON payload
+    # 4. Build and send POST request
     payload = {
         "p_badge_uid": badge_uid,
         "p_pin_code": pin_code,
@@ -68,17 +96,33 @@ while True:
         "p_source_team": source_team
     }
 
-    # Send POST request
     try:
-        response = requests.post(API_ENDPOINT, json=payload)
-        response.raise_for_status()  # Raise error if not 200-299
-        json_response = response.json()
-        print("API Response:", json_response)  # Process further as needed
-        # TODO: Add further processing here, e.g., display on LCD based on response
-    except requests.exceptions.RequestException as e:
-        print(f"API Error: {e}")
-        # Handle error, e.g., display "Error" on LCD
+        response = requests.post(API_ENDPOINT, json=payload, timeout=5)
+        response.raise_for_status()
+        data = response.json()
 
-    # Clear LCD after operation
+        access_granted = data.get("access_granted", False)
+        denial_reason  = data.get("denial_reason")
+
+        lcd.clear()
+
+        if access_granted:
+            lcd.write_string("Access Granted")
+            door.on()
+            time.sleep(15)          # Hold signal high for 15 seconds
+            door.off()
+        else:
+            reason = denial_reason or "Unknown"
+            lcd.write_string("Denied:")
+            lcd.cursor_pos = (1, 0)
+            # Truncate reason if too long for 16-char display
+            lcd.write_string(reason[:16])
+
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+        lcd.clear()
+        lcd.write_string("Server Error")
+
+    # Brief pause before allowing next scan
+    time.sleep(3)
     lcd.clear()
-    time.sleep(2)  # Short delay before next scan
